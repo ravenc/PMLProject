@@ -1,0 +1,155 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "R.V."
+date: "Saturday, December 20, 2014"
+output: html_document
+---
+
+## Background
+
+The purpose of this project is to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants which were asked to perform barbell lifts correctly and incorrectly in 5 different ways. For more information see: http://groupware.les.inf.puc-rio.br/har (see the section on the Weight Lifting Exercise Dataset). 
+
+## Data 
+
+The training data for this project are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+The test data are available here: 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+## Data cleaning and preparation
+
+```{r, message=FALSE, cache=FALSE, results='hide',cache=TRUE}
+# load packages needed for analysis
+library(caret)
+
+# set seed for reproducibility
+set.seed(123)
+```
+
+Training and test data were downloaded and loaded into R:
+```{r, cache=TRUE}
+temp <- tempfile()
+fileUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+download.file(fileUrl, temp)
+pml_training <- read.csv(temp, na.strings=c("","NA", "#DIV/0!"))
+unlink(temp)
+
+temp <- tempfile()
+fileUrl <- "http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileUrl, temp)
+testing <- read.csv(temp, na.strings=c("","NA", "#DIV/0!"))
+unlink(temp)
+```
+
+The `pml_training` data was split into two parts: 90% went into `training` set for model building and the remaining 10% into`validation` set for model testing/validation.
+```{r, cache=TRUE}
+classeVar <- pml_training$classe
+inTrain <- createDataPartition(classeVar, p=0.9, list=FALSE)
+training <- pml_training[inTrain, ]
+validation <- pml_training[-inTrain, ]
+```
+
+There are a lot of variables with an overwhleming majority (>98%) of their observations having 'NA's. This means they can not be imputed from the existing observations. 
+```{r, results='hide', cache=TRUE}
+summary(training) # the results of this code were not printed due to huge dimensions
+```
+
+These variables will be removed from the dataset and not used in the analysis.
+```{r, cache=TRUE}
+nas <- sapply(training, function(x) sum(is.na(x)))
+training <- training[names(nas[nas<100])]
+```
+
+We can see that are no more `NA`s  left in the whole dataset.
+```{r}
+sum(is.na(training))
+```
+
+We also remove variables which are not useful for model building:
+```{r, cache=TRUE}
+training <- training[,-c(1:5)]
+```
+
+Further, we remove zero covariates - covariates with (virtually) no variability are not useful for modelling/prediction. There is only one such covariate `new_window`.
+```{r, cache=TRUE}
+nsv <- nearZeroVar(training, saveMetrics=TRUE)
+nsv[(nsv$zeroVar=="TRUE" | nsv$nzv=="TRUE"), ]
+training <- training[, -1]
+```
+
+Next, we check for highly correlated covariates and remove one in a correlation pair where  rho>0.85.
+```{r, cache=TRUE}
+M <- abs(cor(training[ , -54]))
+diag(M) <- 0    #  not interested in variable correlation with itself
+which(M > 0.85, arr.ind=T)      # print vars with cor>0.85
+training <- training[,-c(2, 3, 5, 9, 10, 19, 32, 47)] 
+```
+
+Now we apply the changes made to `training` dataset to `validation` and `testing` datasets.
+```{r, cache=TRUE}
+validation <- validation[names(training)]
+testing <- testing[names(training[-length(training)])]
+```
+
+## Model building, validation and prediction
+
+We train a model using decision tree algorithm; set resampling method to boot.
+```{r, cache=TRUE}
+model1 <- train(classe~., data=training, method='rpart',  
+                trControl=trainControl(method='boot', number=25))
+model1
+```
+As can be seen in-sample accuracy is very low. 
+Let's try predicting with the model:
+```{r, cache=TRUE}
+predictionV <- predict(model1, validation)
+confusionMatrix(validation$classe, predictionV)
+```
+As could be expected from in-sample measures, accuracy is unacceptablly low, only 0.6112. Therefore we will have to model using other algorithms.
+
+Next, we try random forest algorithm. To speed up model building process multiple CPU cores are assigned.
+```{r, message=FALSE, results='hide', cache=TRUE}
+# assign number (4) of cores to use for model building
+library('doSNOW')
+cl<-makeCluster(4) 
+registerDoSNOW(cl) 
+```
+Train the model using random forest algorithm; set resampling method to cross validation.
+```{r, cache=TRUE}
+model2 <- train(classe~., data=training, method='rf', 
+                trControl=trainControl(method ='cv', number=4), prox=FALSE)
+stopCluster(cl) # terminate CPU core assignment
+model2
+model2$finalModel
+```
+This time the model error rate was a mere 0.19%. It seems there will be no need for another model.
+
+Let's predict `classe` values for `validation` dataset based on the built random forest model.
+```{r, cache=TRUE}
+predictionV <- predict(model2, validation)
+confusionMatrix(validation$classe, predictionV)
+```
+The expected out-of-sample accuracy is extremely high: 0.999 (95% CI: (0.9963, 0.9999)). **The expected out-of-sample error = 1 - accuracy = 1 - 0.999 = 0.001 (or 0.1%)**. Such a small error would mean that we would expect to correctly predict all 20 `classe` variables for `testing` data.
+
+Finally, let us predict `classe` values for `testing` data using the same model. 
+```{r, cache=TRUE}
+predictionT <- predict(model2, testing)
+predictionT
+```
+
+## Submission and conclusion
+
+An automated process to write each prediction to a separate file for submission was used.
+```{r, cache=TRUE}
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(predictionT)
+```
+
+To no surprise, **all 20 submissions were correct.** This was expected, due to the extremely small expected out-of-sample error. The `model2` built using random forest proved to be a very good prediction model.
